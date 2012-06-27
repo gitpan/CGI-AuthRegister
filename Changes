@@ -1,0 +1,10 @@
+# file: Changes
+# CGI::Authenticate - Simple CGI Authentication in Perl
+# (c) 2012 Vlado Keselj http://web.cs.dal.ca/~vlado
+# $Date: $
+# $Id: $
+
+Revision history for Perl extension CGI::Authenticate
+
+0.1  Sat Jun 23 00:14:20 ADT 2012
+	- created module based on code form 2011
