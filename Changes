@@ -17,3 +17,6 @@ Revision history for Perl extension CGI::Authenticate
 	- introduced: require_login
 	- introducedL reset_and_send_email_reminder
 	- added examples/2/index.cgi
+
+0.3  Thu Jun 28 15:11:29 ADT 2012
+	- documentation improvement

@@ -14,7 +14,7 @@ use strict;
 use vars qw($NAME $ABSTRACT $VERSION);
 $NAME     = 'AuthRegister';
 $ABSTRACT = 'Simple CGI Authentication and Registration in Perl';
-$VERSION  = '0.2';
+$VERSION  = '0.3';
 #-
 use CGI qw(cookie header param password_field textfield);
 use Carp;
@@ -507,6 +507,20 @@ db/users.db, which may look as follows (RFC822-like format):
 It is important to separate records by empty lines, and email field is
 important, while userid field is optional.  More fields can be added
 if needed, this module does not use other fields.
+
+This is a short and simple example of a CGI script index.cgi
+(included as examples/2/index.cgi):
+
+  #!/usr/bin/perl
+  use CGI::AuthRegister;
+
+  &require_https;  # Require HTTPS connection
+  &require_login;  # Require login and print HTTP header,
+                   # and handles logout too
+
+  print "<html><body>Successfully logged in as $UserEmail\n";
+  print "<p>To logout, click here:\n",
+    "<a href=\"$ENV{SCRIPT_NAME}?logout\">Logout</a>\n";
 
 The following script, named index.cgi, which is available with the
 distribution in example/1, demonstrates the main module
