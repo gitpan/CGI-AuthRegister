@@ -8,3 +8,12 @@ Revision history for Perl extension CGI::Authenticate
 
 0.1  Sat Jun 23 00:14:20 ADT 2012
 	- created module based on code form 2011
+
+0.2  Thu Jun 28 14:57:25 ADT 2012
+	- starfish-related improvements
+	- introducing protected namespace CGI::Authenticate with
+  	  appropriate exports of names
+	- improvement in the example/1 and in the documentation
+	- introduced: require_login
+	- introducedL reset_and_send_email_reminder
+	- added examples/2/index.cgi

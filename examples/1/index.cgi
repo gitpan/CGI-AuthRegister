@@ -1,6 +1,8 @@
 #!/usr/bin/perl
 use CGI qw(:standard);
 use CGI::AuthRegister;
+use strict;
+use vars qw($HTMLstart $Formstart $Back $Request_type);
 
 &require_https;  # Require HTTPS connection
 &analyze_cookie; # See if the user is already logged in

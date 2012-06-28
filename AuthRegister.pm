@@ -7,17 +7,23 @@
 # $Id: $
 #-
 
-#package CGI::AuthRegister
+package CGI::AuthRegister;
 use strict;
-use Carp;
-
 #<? &generate_standard_vars !>
 #+
 use vars qw($NAME $ABSTRACT $VERSION);
 $NAME     = 'AuthRegister';
 $ABSTRACT = 'Simple CGI Authentication and Registration in Perl';
-$VERSION  = '0.1';
+$VERSION  = '0.2';
 #-
+use CGI qw(cookie header param password_field textfield);
+use Carp;
+require Exporter;
+use vars qw(@ISA @EXPORT);
+@ISA = qw(Exporter);
+@EXPORT = qw( $SessionId $SiteId $UserEmail
+  analyze_cookie header_delete_cookie header_session_cookie login logout
+  require_https require_login send_email_reminder );
 
 use vars qw($Email_from $Email_bcc $Error $ErrorInternal $LogReport $Sendmail
   $Session $SessionId $SiteId $Ticket $User $UserEmail);
@@ -50,6 +56,65 @@ sub require_https {
 	print "Status: 301 Moved Permanently\nLocation: https://$ENV{SERVER_NAME}$ENV{SCRIPT_NAME}\n\n";
 	exit 0;
     }
+}
+
+# If not logged in, ask for userid/email and password.  Caches ?logout request as well.
+sub require_login {
+  my $title = "Login Page for Site: $SiteId";
+  my $HTMLstart = "<HTML><HEAD><TITLE>$title</TITLE><BODY><h1>$title</h1>\n";
+  my $Formstart = "<form action=\"$ENV{SCRIPT_NAME}\" method=\"post\">";
+  my $Back = "<a href=\"$ENV{SCRIPT_NAME}\">Click here for the main page.</a>\n";
+  my $LoginForm =  "<p>Please log in to access the site:<br>\n".$Formstart.
+    "<table><tr><td align=right>Userid or email:</td><td>".
+    textfield(-name=>"userid")."</td></tr>\n<tr><td align=right>".
+    "Password:</td><td>".password_field(-name=>"password")."</td></tr>\n".
+    '<tr><td>&nbsp;</td><td><input type="submit" name="request_type" value="Login"/>'.
+    "</td></tr></table></form>\n";
+  my $SendResetForm = "<p>If you forgot your password, it may be possible to ".
+    "retrieve it by email:<br>\n".$Formstart."Email: ".
+    textfield(-name=>"email_pw_send")."\n".
+    '<input type="submit" name="request_type" value="Send_Password"/>'.
+    "</form>\n".
+    "Or, you can reqest password to be reset and sent to you:<br>\n".
+    $Formstart."Email: ".textfield(-name=>"email_reset")."\n".
+    '<input type="submit" name="request_type" value="Reset_Password"/>'.
+    "</form>\n";
+
+  &analyze_cookie;
+  if ($SessionId ne '' && param('keywords') eq 'logout') {
+    logout(); print header_delete_cookie(), $HTMLstart,
+    "<p>Your are logged out.\n", $LoginForm, $SendResetForm; exit; }
+
+  if ($SessionId ne '') { print header(); return 1; }
+
+  my $Request_type = param('request_type');
+
+  if ($Request_type eq 'Login') {
+    my $email = param('userid'); my $password = param('password');
+    if (! &login($email, $password) ) { # checks for userid and email
+      print header(), $HTMLstart, "Unsuccessful login!\n";
+      print $LoginForm, $SendResetForm; exit;
+    }
+    else { print header_session_cookie(); return 1; }
+  }
+  elsif ($Request_type eq 'Send_Password') {
+    &send_email_reminder(param('email_pw_send'), 'raw');
+    print header(), $HTMLstart, "You should receive password reminder if ".
+      "your email is registered at this site.\n".
+      "If you do not receive remider, you can contact the administrator.\n",
+      $LoginForm, $SendResetForm; exit;
+  }
+  elsif ($Request_type eq 'Reset_Password') {
+    &reset_and_send_email_reminder(param('email_reset'), 'raw');
+    print header(), $HTMLstart, "You should receive new password if ".
+      "your email is registered at this site.\n".
+      "If you do not receive remider, you can contact the administrator.\n",
+      $LoginForm, $SendResetForm; exit;
+  }
+  else { # should be: $Request_type eq ''
+    print header(), $HTMLstart, $LoginForm, $SendResetForm; exit; }
+  
+  die; # Not supposed to be reached
 }
 
 # Prepare HTTP header. If SessionId is not empty, generate cookie with
@@ -214,35 +279,53 @@ sub random_name {
 
 ########################################################################
 # Email communication
+
+# params: $email, opt: 'raw' or 'md5' to generate passord
+sub reset_and_send_email_reminder {
+    my $email = shift; my $pwstore = shift;
+    $email=lc $email; $email =~ s/\s/ /g;
+    if ($email eq '') {
+      $Error.="282-ERR:No e-mail provided to send password\n"; return; }
+    if (!emailcheckok($email)) {
+      $Error.="284-ERR:Invalid e-mail address provided($email)\n"; return; }
+    my $user = get_user_by_email($email);
+    if ($user eq '') {
+      $Error.="287-ERR: No user with email ($email)\n"; return; }
+    my $pw = &reset_password($email, $pwstore);
+    &send_email_reminder1($email, $pw);
+    return 1;
+}
+
 # params: $email, opt: 'raw' or 'md5' to generate new password if not found
 sub send_email_reminder {
     my $email = shift; my $pwstore = shift;
     $email=lc $email; $email =~ s/\s/ /g;
     if ($email eq '') {
-      $Error.="220-ERR:No e-mail provided to send password\n"; return; }
+      $Error.="282-ERR:No e-mail provided to send password\n"; return; }
     if (!emailcheckok($email)) {
-      $Error.="222-ERR:Invalid e-mail address provided($email)\n"; return; }
+      $Error.="284-ERR:Invalid e-mail address provided($email)\n"; return; }
     my $user = get_user_by_email($email);
     if ($user eq '') {
-      $Error.="224-ERR: No user with email ($email)\n"; return; }
+      $Error.="287-ERR: No user with email ($email)\n"; return; }
     my $pw = find_password($email);
     if ($pw =~ /^raw:/) { $pw = $' }
-    elsif ($pw ne '') { $Error.="227-ERR:Cannot retrieve password\n"; return; }
-    else {
-      if ($pwstore eq 'raw') { $pw = &reset_password($email, 'raw') }
-      elsif ($pwstore eq 'md5') { $pw = &reset_password($email, 'md5') }
-      else { $Error.="232-ERR:No password for email($email)\n"; return ''; }
-    }
+    elsif ($pw ne '') { $Error.="290-ERR:Cannot retrieve password\n"; return; }
+    else { $pw = &reset_password($email, $pwstore) }
 
-    my $httpslogin = "https://$ENV{SERVER_NAME}$ENV{SCRIPT_NAME}";
-
-    my $msg = "Hi,\n\nYour email and password for the $SiteId site is:\n\n".
-      "Email: $email\nPassword: $pw\n\n".
-	"You can log in at:\n\n$httpslogin\n\n\n".
-        # "$HttpsBaseLink/login.cgi\n\n\n".
-      "Best regards,\n$SiteId Admin\n";
-    &send_email_to($email, "Subject: $SiteId Password Reminder", $msg);
+    &send_email_reminder1($email, $pw);
     return 1;
+}
+
+sub send_email_reminder1 {
+  my $email = shift; my $pw = shift;
+  my $httpslogin = "https://$ENV{SERVER_NAME}$ENV{SCRIPT_NAME}";
+
+  my $msg = "Hi,\n\nYour email and password for the $SiteId site is:\n\n".
+    "Email: $email\nPassword: $pw\n\n".
+      "You can log in at:\n\n$httpslogin\n\n\n".
+        # "$HttpsBaseLink/login.cgi\n\n\n".
+	"Best regards,\n$SiteId Admin\n";
+  &send_email_to($email, "Subject: $SiteId Password Reminder", $msg);
 }
 
 sub send_email_to {
@@ -432,19 +515,21 @@ functionalities:
   #!/usr/bin/perl
   use CGI qw(:standard);
   use CGI::AuthRegister;
-
+  use strict;
+  use vars qw($HTMLstart $Formstart $Back $Request_type);
+  
   &require_https;  # Require HTTPS connection
   &analyze_cookie; # See if the user is already logged in
-
+  
   # Some useful strings
   $HTMLstart = "<HTML><BODY><PRE>Site: $SiteId\n";
   $Formstart = "<form action=\"$ENV{SCRIPT_NAME}\" method=\"post\">";
   $Back = "<a href=\"$ENV{SCRIPT_NAME}\">Click here for the main page.</a>\n";
-
+  
   $Request_type = param('request_type');
   $Request_type = '' unless grep {$_ eq $Request_type}
     qw(Login Logout Send_Password);
-
+  
   if ($Request_type eq '') {
     print header(), $HTMLstart;
     if ($SessionId eq '') {
@@ -501,10 +586,13 @@ functionalities:
 
 CGI::AuthRegister is a Perl module for CGI user authentication and
 registration.  It is created with objective to be simple, flexible,
-and transparent.  For the sake of simplicity it will likely be not
-very portable, but mostly designed for a Linux environment.  For
-example, it relies on a directly calling sendmail for sending email
-messages.
+and transparent.  For the sake of simplicity, it is not completely
+portable, but mostly designed for Linux environment.  As an example,
+it relies on a directly calling sendmail for sending email messages.
+
+Example 1, included in the distribution, and shown above, illustrates
+the main functionalities of the module in one CGI file.  The module is
+designed with the assumption that the CGI programs run with user uid.
 
 =head1 SEE ALSO
 
@@ -543,4 +631,3 @@ and flexibility.
 =back
 
 =cut
-# $Id: $
