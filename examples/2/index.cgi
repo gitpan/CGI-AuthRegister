@@ -1,6 +1,7 @@
 #!/usr/bin/perl
 use CGI::AuthRegister;
 
+&import_dir_and_config;
 &require_https;  # Require HTTPS connection
 &require_login;  # Require login and print HTTP header, and handles logout too
 

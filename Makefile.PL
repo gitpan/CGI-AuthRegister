@@ -2,7 +2,7 @@
 #+
 # file: Makefile.PL
 # CGI::AuthRegister - Simple CGI Authentication and Registration in Perl
-# (c) 2012 Vlado Keselj http://web.cs.dal.ca/~vlado
+# (c) 2012-14 Vlado Keselj http://web.cs.dal.ca/~vlado
 # $Date: $
 # $Id: $
 #-
@@ -15,7 +15,7 @@ WriteMakefile(
     'ABSTRACT'          => 'Simple CGI Authentication and Registration in Perl',
     'VERSION_FROM'	=> 'AuthRegister.pm', # finds $VERSION
     'PREREQ_PM'		=> {}, # e.g., Module::Name => 1.1
-    (5.008008 >= 5.005 ?    ## Add these new keywords supported since 5.005
+    (5.014004 >= 5.005 ?    ## Add these new keywords supported since 5.005
        ( AUTHOR     => 'Vlado Keselj http://web.cs.dal.ca/~vlado') : ()),
     #-
     'dist'  => {'COMPRESS'=>'gzip', 'SUFFIX' => 'gz'},

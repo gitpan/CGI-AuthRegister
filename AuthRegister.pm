@@ -2,7 +2,7 @@
 #+
 # file: AuthRegister.pm
 # CGI::AuthRegister - Simple CGI Authentication and Registration in Perl
-# (c) 2012 Vlado Keselj http://web.cs.dal.ca/~vlado
+# (c) 2012-14 Vlado Keselj http://web.cs.dal.ca/~vlado
 # $Date: $
 # $Id: $
 #-
@@ -14,19 +14,28 @@ use strict;
 use vars qw($NAME $ABSTRACT $VERSION);
 $NAME     = 'AuthRegister';
 $ABSTRACT = 'Simple CGI Authentication and Registration in Perl';
-$VERSION  = '0.3';
+$VERSION  = '1.0';
 #-
-use CGI qw(cookie header param password_field textfield);
+use CGI qw(:standard);
+# Useful diagnostics:
+# use CGI qw(:standard :Carp -debug);
+# use CGI::Carp 'fatalsToBrowser';
+# use diagnostics; # verbose error messages
+# use strict;      # check for mistakes
 use Carp;
 require Exporter;
 use vars qw(@ISA @EXPORT);
 @ISA = qw(Exporter);
-@EXPORT = qw( $SessionId $SiteId $UserEmail
-  analyze_cookie header_delete_cookie header_session_cookie login logout
-  require_https require_login send_email_reminder );
+@EXPORT = qw($Error $SessionId $SiteId $SiteName $User
+  $UserEmail $SendLogs $LogReport
+  analyze_cookie header_delete_cookie header_session_cookie
+  import_dir_and_config login logout
+  require_https require_login send_email_reminder
+  get_user get_user_by_userid set_new_session store_log
+ );
 
 use vars qw($Email_from $Email_bcc $Error $ErrorInternal $LogReport $Sendmail
-  $Session $SessionId $SiteId $Ticket $User $UserEmail);
+  $Session $SessionId $SiteId $SiteName $Ticket $User $UserEmail $SendLogs);
 # $Error = ''; # Appended error messages, OK to be sent to user
 # $ErrorInternal = ''; # Appended internal error messages, intended
                        # for administrator
@@ -34,9 +43,11 @@ use vars qw($Email_from $Email_bcc $Error $ErrorInternal $LogReport $Sendmail
 # $Session   = '';  # Session data structure
 # $SessionId = '';  # Session identifier, generated
 $SiteId = 'Site';   # Site identifier, used in cookies and emails
+$SiteName = 'Site'; # Site name, can include spaces
 # $Ticket = '';     # Session ticket for security, generated
 # $User      = '';  # User data structure
 # $UserEmail = '';  # User email address
+# $SendLogs  = '';  # If true, send logs by email to admin ($Email_bcc)
 
 $Email_from = ''; # Example: $SiteId.' <vlado@cs.dal.ca>';
 $Email_bcc  = ''; # Example: $SiteId.' Bcc <vlado@cs.dal.ca>';
@@ -45,6 +56,15 @@ $Sendmail = "/usr/lib/sendmail"; # Sendmail with full path
 
 # Functions
 sub putfile($@);
+
+########################################################################
+# Configuration
+# sets site id as the base directory name; imports configuration.pl if exists
+sub import_dir_and_config {
+  my $base = `pwd`; $base =~ /\/([^\/]*)$/; $base = $1; $base =~ s/\s+$//;
+  $SiteId = $SiteName = $base;
+  if (-r 'configuration.pl') { package main; require 'configuration.pl'; }
+}
 
 ########################################################################
 # HTTPS Connection and Cookies Management
@@ -58,7 +78,10 @@ sub require_https {
     }
 }
 
-# If not logged in, ask for userid/email and password.  Caches ?logout request as well.
+# If not logged in, ask for userid/email and password.  Catches ?logout
+# request as well. Allows parentheses in userid/email for login, which are
+# removed.  This allows users to use auxiliary comments with userid, so that
+# browser can distinguish passwords.
 sub require_login {
   my $title = "Login Page for Site: $SiteId";
   my $HTMLstart = "<HTML><HEAD><TITLE>$title</TITLE><BODY><h1>$title</h1>\n";
@@ -83,7 +106,7 @@ sub require_login {
   &analyze_cookie;
   if ($SessionId ne '' && param('keywords') eq 'logout') {
     logout(); print header_delete_cookie(), $HTMLstart,
-    "<p>Your are logged out.\n", $LoginForm, $SendResetForm; exit; }
+    "<p>You are logged out.\n", $LoginForm, $SendResetForm; exit; }
 
   if ($SessionId ne '') { print header(); return 1; }
 
@@ -91,6 +114,8 @@ sub require_login {
 
   if ($Request_type eq 'Login') {
     my $email = param('userid'); my $password = param('password');
+    $email =~ s/\(.*\)//g; $email =~ s/\s+$//; $email =~ s/^\s+//;
+
     if (! &login($email, $password) ) { # checks for userid and email
       print header(), $HTMLstart, "Unsuccessful login!\n";
       print $LoginForm, $SendResetForm; exit;
@@ -102,7 +127,9 @@ sub require_login {
     print header(), $HTMLstart, "You should receive password reminder if ".
       "your email is registered at this site.\n".
       "If you do not receive remider, you can contact the administrator.\n",
-      $LoginForm, $SendResetForm; exit;
+      $LoginForm, $SendResetForm;
+    $LogReport.=$Error; &store_log;
+    exit;
   }
   elsif ($Request_type eq 'Reset_Password') {
     &reset_and_send_email_reminder(param('email_reset'), 'raw');
@@ -117,11 +144,40 @@ sub require_login {
   die; # Not supposed to be reached
 }
 
+# Requires session (i.e., to be logged in).  Otherwise, makes redirection.
+sub require_session {
+  my %args=@_; my $defaultcgi = 'index.cgi';
+  if (exists($args{-redirect}) && $args{-redirect} ne '' &&
+      $args{-redirect} ne $ENV{SCRIPT_NAME})
+  { $defaultcgi = $args{-redirect} }
+  if (exists($args{-back}) && $args{-back}) {
+    $defaultcgi.="?goto=$args{-back}";
+  }
+  &analyze_cookie;
+  if ($SessionId eq '') {
+    if ($ENV{SCRIPT_NAME} eq $defaultcgi) {
+      print CGI::header(), CGI::start_html, CGI::h1("147-ERR:Login required");
+      exit; }
+    print CGI::redirect(-uri=>$defaultcgi); exit;
+  }
+}
+
 # Prepare HTTP header. If SessionId is not empty, generate cookie with
 # the sessionid and ticket.
 sub header_session_cookie {
+  my %args=@_; my $redirect=$args{-redirect};
+  if ($redirect ne '') {
+    if ($SessionId eq '') { return redirect(-uri=>$redirect) }
+    else {
+      return redirect(-uri=>$redirect,-cookie=>
+		      cookie(-name=>$SiteId,
+			     -value=>"$SessionId $Ticket"));
+    }
+  } else {
     if ($SessionId eq '') { return header } else
-    { return header(-cookie=>cookie(-name=>$SiteId, -value=>"$SessionId $Ticket")) }
+      { return header(-cookie=>cookie(-name=>$SiteId,
+				      -value=>"$SessionId $Ticket")) }
+  }
 }
 
 # Delete cookie after logging out. Return string.
@@ -138,18 +194,18 @@ sub analyze_cookie {
     if ($c eq '') { $SessionId = $Ticket = ''; return; }
     ($SessionId, $Ticket) = split(/\s+/, $c);
     if ($SessionId !~ /^[\w.:-]+$/ or $Ticket !~ /^\w+$/)
-    { $SessionId = $Ticket = ''; return; }
+    { $User = $SessionId = $Ticket = ''; return; }
 
     # check validity of session and set user variables
     my $sessioninfofile = "db/sessions.d/$SessionId/session.info";
     if (!-f $sessioninfofile) { $SessionId = $Ticket = ''; return; }
     my $se = &read_db_record("file=$sessioninfofile");
-    if (!ref($se) or $Ticket ne $se->{'Ticket'}) { $SessionId = $Ticket = ''; return; }
+    if (!ref($se) or $Ticket ne $se->{'Ticket'})
+    { $User = $SessionId = $Ticket = ''; return; }
     $Session = $se;
     $UserEmail = $se->{email};
-    
     $User = &get_user_by_email($UserEmail);
-    if ($Error ne '') {	$SessionId = $Ticket = ''; return; }
+    if ($Error ne '') {	$User = $SessionId = $Ticket = ''; return; }
 }
 
 ########################################################################
@@ -192,12 +248,11 @@ sub random_password {
 
 # removes session file and return the appropriate HTTP header
 sub logout {
-  if ($Session eq '') { $Error.= "126-ERR: No session to log out\n"; return; }
-  if (!-f "db/sessions.d/$SessionId") {
-    $Error.='128-ERR: No session file'; return; }
-  # rename("db/sessions.d/$SessionId","db/sessions.d/loggedout-$SessionId");
-  unlink("db/sessions.d/$SessionId");
-  $LogReport.="User $UserEmail logged out.";
+  if ($Session eq '') { $Error.= "217-ERR: No session to log out\n"; return; }
+  if (!-d "db/sessions.d/$SessionId") { $Error.="218-ERR: No session dir\n" }
+  else {
+    unlink(<db/sessions.d/$SessionId/*>); rmdir("db/sessions.d/$SessionId"); }
+  $LogReport.=$Error."User $UserEmail logged out."; &store_log;
   $Session = $SessionId = $Ticket = '';
   return 1;
 }
@@ -209,23 +264,27 @@ sub login {
     if ($email !~ /@/) { $userid=$email; $email=''; }
     if ($email ne '') {
       if (!&emailcheckok($email)) {
-	$Error.="97-ERR:Incorrect email address format"; return; }
-      my $u = &get_user_by_email($email);
-      if ($u eq '') { $Error.='99-ERR:Email not registered'; return; }
+	$Error.="242-ERR:Incorrect email address format"; return; }
+      #my $u = &get_user_by_email($email);
+      my $u = &get_user_unique('email', $email);
+      if ($u eq '') { $Error.='245-ERR:Email not registered'; return; }
       $userid = $u->{userid};
       $User = $u;
     } else {
-      if ($userid eq '') { $Error.="103-ERR:Empty userid"; return; }
-      my $u = &get_user_by_userid($userid);
-      if ($u eq '') { $Error.='105-ERR:Userid not registered'; return; }
+      if ($userid eq '') { $Error.="249-ERR:Empty userid"; return; }
+      #my $u = &get_user_by_userid($userid);
+      my $u = &get_user_unique('userid', $userid);
+      if ($u eq '') { $Error.='252-ERR:Not exist-unique'; return; }
       $email = $u->{email};
       $User = $u;
     }
 
     if (!password_check($User, $password)) {
-      $Error.="205:Invalid password\n"; return ''; }
+      $Error.="258:Invalid password\n"; return ''; }
 
-    &set_new_session($User); return 1;
+    &set_new_session($User);
+    $LogReport.="User $UserEmail logged in.\n"; &store_log;
+    return 1;
 }
 
 sub set_new_session {
@@ -254,20 +313,22 @@ sub password_check {
     $pwstored=$'; return ( ($pwstored eq $password) ? 1 : '' ); }
   if ($pwstored =~ /^md5:/) {
     $pwstored=$'; return ( ($pwstored eq md5_base64($password)) ? 1 : ''); }
-  $Error.="268-ERR:PWCheck error\n"; return '';
+  $Error.="316-ERR:PWCheck error($pwstored)\n"; $ErrorInternal="AuthRegister:$Error"; return '';
 }
 
 sub find_password {
   my $email = shift; my $pwfile = "db/passwords";
+  $email = lc $email;
   if (!-f $pwfile) { putfile $pwfile, ''; chmod 0600, $pwfile }
-  if (!&lock_mkdir($pwfile)) { $Error.="195-ERR:\n"; return ''; }
+  if (!&lock_mkdir($pwfile)) { $Error.="309-ERR:\n"; return ''; }
   local *PH; if (!open(PH,$pwfile)) {
     &unlock_mkdir($pwfile);
-    $Error.="197-ERR: Cannot open ($pwfile):$!\n"; return ''; }
+    $Error.="312-ERR: Cannot open ($pwfile):$!\n"; return ''; }
   while (<PH>) {
-    my ($e,$p) = split;
+    my ($e,$p) = split; $e = lc $e;
     if ($e eq $email) { close(PH); &unlock_mkdir($pwfile); return $p; }
   }
+  $Error.="NOTFOUND($email)";
   close(PH); &unlock_mkdir($pwfile); return '';
 }
 
@@ -275,6 +336,13 @@ sub random_name {
     my $n = shift; $n = 8 unless $n > 0;
     my @chars = (0..9, 'a'..'z', 'A'..'Z');
     return join('', map { $chars[rand($#chars+1)] } (1..$n));
+}
+
+sub store_log {
+  if($#_>=-1) { $LogReport.=$_[0] }
+  return if $LogReport eq '';
+  if ($SendLogs) { &send_email_to_admin('Log entry', $LogReport) }
+  $LogReport = '';
 }
 
 ########################################################################
@@ -285,12 +353,12 @@ sub reset_and_send_email_reminder {
     my $email = shift; my $pwstore = shift;
     $email=lc $email; $email =~ s/\s/ /g;
     if ($email eq '') {
-      $Error.="282-ERR:No e-mail provided to send password\n"; return; }
+      $Error.="328-ERR:No e-mail provided to send password\n"; return; }
     if (!emailcheckok($email)) {
-      $Error.="284-ERR:Invalid e-mail address provided($email)\n"; return; }
-    my $user = get_user_by_email($email);
+      $Error.="330-ERR:Invalid e-mail address provided($email)\n"; return; }
+    my $user = get_user_unique('email',$email);
     if ($user eq '') {
-      $Error.="287-ERR: No user with email ($email)\n"; return; }
+      $Error.="333-ERR: No user with email ($email)\n"; return; }
     my $pw = &reset_password($email, $pwstore);
     &send_email_reminder1($email, $pw);
     return 1;
@@ -301,15 +369,15 @@ sub send_email_reminder {
     my $email = shift; my $pwstore = shift;
     $email=lc $email; $email =~ s/\s/ /g;
     if ($email eq '') {
-      $Error.="282-ERR:No e-mail provided to send password\n"; return; }
+      $Error.="356-ERR:No e-mail provided to send password\n"; return; }
     if (!emailcheckok($email)) {
-      $Error.="284-ERR:Invalid e-mail address provided($email)\n"; return; }
+      $Error.="358-ERR:Invalid e-mail address provided($email)\n"; return; }
     my $user = get_user_by_email($email);
     if ($user eq '') {
-      $Error.="287-ERR: No user with email ($email)\n"; return; }
+      $Error.="361-ERR: No user with email ($email)\n"; return; }
     my $pw = find_password($email);
     if ($pw =~ /^raw:/) { $pw = $' }
-    elsif ($pw ne '') { $Error.="290-ERR:Cannot retrieve password\n"; return; }
+    elsif ($pw ne '') { $Error.="364-ERR:Cannot retrieve password\n"; return; }
     else { $pw = &reset_password($email, $pwstore) }
 
     &send_email_reminder1($email, $pw);
@@ -328,6 +396,18 @@ sub send_email_reminder1 {
   &send_email_to($email, "Subject: $SiteId Password Reminder", $msg);
 }
 
+sub send_email_to_admin {
+  my $subject = shift; my $msg1 = shift;
+  $subject =~ s/\s+/ /g;
+  $subject = "Subject: [$SiteId System Report] $subject";
+  return if $Email_bcc eq '';
+  my $msg = '';
+  $msg.="From: $Email_from\n" unless $Email_from eq '';
+  $msg.="To: $Email_bcc\n";
+  $msg.="$subject\n\n$msg1";
+  &_send_email($msg);
+}
+
 sub send_email_to {
   my $email = shift; croak unless &emailcheckok($email);
   my $subject = shift; $subject =~ s/[\n\r]/ /g;
@@ -339,13 +419,17 @@ sub send_email_to {
   $msg.="To: $email\n";
   $msg.="Bcc: $Email_bcc\n" unless $Email_bcc eq '';
   $msg.="$subject\n\n$msg1";
+  &_send_email($msg);
+}
 
+sub _send_email {
+  my $fullmessage = shift;
   if (! -x $Sendmail) {
-    $Error.="257-ERR:No sendmail ($Sendmail)\n"; return ''; }
+    $Error.="390-ERR:No sendmail ($Sendmail)\n"; return ''; }
   local *S;
   if (!open(S,"|$Sendmail -ti")) {
-    $Error.="250-ERR:Cannot run sendmail:$!\n"; return ''; }
-  print S $msg; close(S); $Error.="Sent:$msg";
+    $Error.="393-ERR:Cannot run sendmail:$!\n"; return ''; }
+  print S $fullmessage; close(S);
 }
 
 ########################################################################
@@ -369,19 +453,51 @@ sub useridcheckok {
 sub get_user_by_email {
     my $email = shift;
     if (!-f 'db/users.db')
-    { $Error.= "292-ERR: no file db/users.db\n"; return; }
+    { $Error.= "454-ERR: no file db/users.db\n"; return; }
     my @db = @{ &read_db('file=db/users.db') };
-    for my $r (@db) { if ($email eq $r->{email}) { return $User=$r } }
-    $Error.="295-ERR: no user with email ($email)\n"; return $User='';
+    for my $r (@db) { if (lc($email) eq lc($r->{email})) { return $User=$r } }
+    $Error.="457-ERR: no user with email ($email)\n"; return $User='';
 }
 
 sub get_user_by_userid {
     my $userid = shift;
     if (!-f 'db/users.db')
-    { $Error.= "301-ERR: no file db/users.db\n"; return; }
+    { $Error.= "463-ERR: no file db/users.db\n"; return; }
     my @db = @{ &read_db('file=db/users.db') };
     for my $r (@db) { if ($userid eq $r->{userid}) { return $User=$r } }
-    $Error.="304-ERR: no user with userid ($userid)."; return $User='';
+    $Error.="466-ERR: no user with userid ($userid)."; return $User='';
+}
+
+sub get_user {
+  my $k = shift; my $v = shift;
+  if (!-f 'db/users.db')
+  { $Error.= "472-ERR: no file db/users.db\n"; return; }
+  my @db = @{ &read_db('file=db/users.db') };
+  for my $r (@db)
+  { if (exists($r->{$k}) && $v eq $r->{$k}) { return $User=$r } }
+  $Error.="476-ERR: no user with key=($k) v=($v)."; return $User='';
+}
+
+# Get user by a key,value, but make sure there is exactly one such user
+# Normalizes whitespace and case insensitive
+sub get_user_unique {
+  my $k = shift; my $v = shift;
+  if (!-f 'db/users.db')
+  { $Error.= "455-ERR: no file db/users.db\n"; return ''; }
+  my @db = @{ &read_db('file=db/users.db') };
+  $v=~s/^\s+//; $v=~s/\s+$//; $v=~s/\s+/ /g; $v = lc $v;
+  if ($k eq '' or $v eq '')
+  { $Error.="461-ERR:Empty k or v ($k:$v)\n"; return ''; }
+  my $u = '';
+  for my $r (@db) {
+    next unless exists($r->{$k}); my $v1 = $r->{$k};
+    $v1=~s/^\s+//; $v1=~s/\s+$//; $v1=~s/\s+/ /g; $v1 = lc $v1;
+    next unless $v eq $v1;
+    if ($u eq '') { $u = $r; next; }
+    $Error.= "467-ERR: double user key ($k:$v)\n"; return '';
+  }
+  return $User=$u unless $u eq '';
+  $Error.="470-ERR: no user with key ($k:$v)\n"; return '';
 }
 
 # Read DB records in the RFC822-like style (to add reference).
@@ -488,10 +604,7 @@ __END__
 
 =head1 NAME
 
-#<? echo "$ModuleName - $ModuleAbstract" !>
-#+
 CGI::AuthRegister - Simple CGI Authentication and Registration in Perl
-#-
 
 =head1 SYNOPSIS
 
@@ -607,6 +720,36 @@ it relies on a directly calling sendmail for sending email messages.
 Example 1, included in the distribution, and shown above, illustrates
 the main functionalities of the module in one CGI file.  The module is
 designed with the assumption that the CGI programs run with user uid.
+
+=head1 PREDEFINED VARIABLES
+
+=head2 $CGI::AuthRegister::Email_bcc
+
+For example,
+
+  $CGI::AuthRegister::Email_bcc = 'Vlado Keselj <vlado+ar@cs.dal.ca>';
+
+If nonempty, causes BCC copies of the emails to be sent to this address.
+This is typically an administrator's address.
+
+=head1 FUNCTIONS
+
+=head2 analyze_cookie()
+
+Analyzes cookied of the web page.  It is called at the beginning of
+the script.  If the cookie contains a valid session id and security
+ticket, it will set variables $SessionId, $Session (a hash),
+$UseEmail, and $User (a hash).  A typical usage is as follows, at the
+beginning of a CGI script, after 'use' and similar statements:
+
+  &import_dir_and_config;  # load configuration.pl, optional
+  &require_https;          # require HTTPS, optional
+  &analyze_cookie;
+
+=head2 import_dir_and_config()
+
+Sets the SiteId as the base directory name.  Loads the configuration.pl
+if it exists.
 
 =head1 SEE ALSO
 
